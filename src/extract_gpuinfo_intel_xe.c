@@ -103,7 +103,30 @@ void gpuinfo_intel_xe_refresh_dynamic_info(struct gpu_info *_gpu_info) {
 }
 
 static const char xe_drm_intel_vram[] = "drm-total-vram0";
-// static const char xe_drm_intel_gtt[] = "drm-total-gtt";
+// Per-region memory keys are "drm-total-<region>" (system, gtt, stolen, vram0, ...)
+static const char xe_drm_intel_total_prefix[] = "drm-total-";
+static const char xe_drm_intel_total_cycles_prefix[] = "drm-total-cycles-";
+
+// Parse a fdinfo memory value ("<n>", "<n> KiB", "<n> MiB", ...) into bytes
+static bool xe_parse_fdinfo_memory(const char *val, uint64_t *bytes) {
+  char *endptr;
+  uint64_t mem = strtoull(val, &endptr, 10);
+  if (endptr == val)
+    return false;
+  while (*endptr == ' ')
+    endptr++;
+  if (*endptr == '\0')
+    *bytes = mem;
+  else if (!strcmp(endptr, "kB") || !strcmp(endptr, "KiB"))
+    *bytes = mem * 1024;
+  else if (!strcmp(endptr, "MiB"))
+    *bytes = mem * 1024 * 1024;
+  else if (!strcmp(endptr, "GiB"))
+    *bytes = mem * 1024 * 1024 * 1024;
+  else
+    return false;
+  return true;
+}
 // Render
 static const char xe_drm_intel_cycles_rcs[] = "drm-cycles-rcs";
 static const char xe_drm_intel_total_cycles_rcs[] = "drm-total-cycles-rcs";
@@ -142,6 +165,11 @@ bool parse_drm_fdinfo_intel_xe(struct gpu_info *info, FILE *fdinfo_file, struct 
 
   union intel_cycles total_cycles = {.array = {0}};
 
+  // Discrete GPUs report dedicated memory as vram0. Integrated GPUs have no vram region, their memory is spread over
+  // the system, gtt and stolen regions, so all the regions are summed up as gputop does.
+  bool vram_found = false, any_region_found = false;
+  uint64_t vram_bytes = 0, all_regions_bytes = 0;
+
   while ((count = getline(&line, &line_buf_size, fdinfo_file)) != -1) {
     char *key, *val;
     // Get rid of the newline if present
@@ -163,18 +191,18 @@ bool parse_drm_fdinfo_intel_xe(struct gpu_info *info, FILE *fdinfo_file, struct 
         continue;
       client_id_set = true;
     } else {
-      if (!strcmp(key, xe_drm_intel_vram)) {
-        unsigned long mem_int;
-        char *endptr;
-
-        mem_int = strtoul(val, &endptr, 10);
-        if (endptr == val || (strcmp(endptr, " kB") && strcmp(endptr, " KiB")))
+      if (!strncmp(key, xe_drm_intel_total_prefix, sizeof(xe_drm_intel_total_prefix) - 1) &&
+          strncmp(key, xe_drm_intel_total_cycles_prefix, sizeof(xe_drm_intel_total_cycles_prefix) - 1)) {
+        uint64_t mem_bytes;
+        if (!xe_parse_fdinfo_memory(val, &mem_bytes))
           continue;
 
-        if GPUINFO_PROCESS_FIELD_VALID (process_info, gpu_memory_usage)
-          SET_GPUINFO_PROCESS(process_info, gpu_memory_usage, process_info->gpu_memory_usage + (mem_int * 1024));
-        else
-          SET_GPUINFO_PROCESS(process_info, gpu_memory_usage, mem_int * 1024);
+        any_region_found = true;
+        all_regions_bytes += mem_bytes;
+        if (!strcmp(key, xe_drm_intel_vram)) {
+          vram_found = true;
+          vram_bytes += mem_bytes;
+        }
       } else {
         unsigned long cycles;
         char *endptr;
@@ -197,6 +225,9 @@ bool parse_drm_fdinfo_intel_xe(struct gpu_info *info, FILE *fdinfo_file, struct 
       }
     }
   }
+
+  if (any_region_found)
+    SET_GPUINFO_PROCESS(process_info, gpu_memory_usage, vram_found ? vram_bytes : all_regions_bytes);
 
   // Sum cycles for overall usage
   {
