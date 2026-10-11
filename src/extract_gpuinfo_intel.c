@@ -148,7 +148,8 @@ static bool read_file_unsigned(const char *path, unsigned *val) {
   return true;
 }
 
-// Look for the platform fan: the first hwmon exposing a readable fan*_input
+// Look for the platform fan (first hwmon exposing a readable fan*_input) and the CPU package temperature
+// (the coretemp "Package id" sensor)
 static void find_platform_sensors(struct gpu_info_intel *gpu_info) {
   const char hwmon_root[] = "/sys/class/hwmon";
   DIR *dir = opendir(hwmon_root);
@@ -162,6 +163,17 @@ static void find_platform_sensors(struct gpu_info_intel *gpu_info) {
     snprintf(path, sizeof(path), "%s/%s/name", hwmon_root, ent->d_name);
     if (!read_file_line(path, name, sizeof(name)))
       continue;
+
+    if (!gpu_info->package_temp_path[0] && !strcmp(name, "coretemp")) {
+      for (unsigned i = 1; i < 100; ++i) {
+        snprintf(path, sizeof(path), "%s/%s/temp%u_label", hwmon_root, ent->d_name, i);
+        if (read_file_line(path, label, sizeof(label)) && !strncmp(label, "Package id", 10)) {
+          snprintf(gpu_info->package_temp_path, sizeof(gpu_info->package_temp_path), "%s/%s/temp%u_input", hwmon_root,
+                   ent->d_name, i);
+          break;
+        }
+      }
+    }
 
     if (!gpu_info->platform_fan_path[0]) {
       unsigned rpm;
@@ -517,6 +529,9 @@ void gpuinfo_intel_refresh_dynamic_info(struct gpu_info *_gpu_info) {
     if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, fan_rpm) && gpu_info->platform_fan_path[0] &&
         read_file_unsigned(gpu_info->platform_fan_path, &val))
       SET_GPUINFO_DYNAMIC(dynamic_info, fan_rpm, val);
+    if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, gpu_temp) && gpu_info->package_temp_path[0] &&
+        read_file_unsigned(gpu_info->package_temp_path, &val))
+      SET_GPUINFO_DYNAMIC(dynamic_info, gpu_temp, val / 1000);
   }
 
   switch (gpu_info->driver) {

@@ -70,8 +70,10 @@ struct gpu_info_intel {
 
   int perf_event_fd;
 
-  // Integrated GPUs have no fan of their own: the platform fan is looked up in hwmon (path cached once found)
+  // Integrated GPUs have no sensors of their own: platform fan and CPU package temperature are looked up in hwmon
+  // (path cached once found)
   char platform_fan_path[96];
+  char package_temp_path[96];
   bool platform_sensors_searched;
 };
 
