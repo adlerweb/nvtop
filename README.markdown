@@ -1,6 +1,16 @@
 NVTOP
 =====
 
+> **This is a fork of [Syllo/nvtop](https://github.com/Syllo/nvtop) aimed at better
+> support for Intel Arc integrated GPUs (iGPUs)** such as Lunar Lake, running on the
+> Linux `xe` driver. It adds per-process GPU memory, and platform fan speed, CPU
+> package temperature and RAPL power draw where the iGPU has no sensors of its own.
+>
+> **Warning: these changes were written by an AI (Claude Code) and have only been
+> tested on a single machine (Core Ultra 200V, Arc 130V/140V).** They have not
+> been reviewed by the upstream maintainers. Expect rough edges and use the
+> upstream project if you need something dependable.
+
 What is NVTOP?
 --------------
 
