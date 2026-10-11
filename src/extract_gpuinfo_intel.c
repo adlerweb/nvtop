@@ -27,6 +27,7 @@
 #include "extract_gpuinfo_intel.h"
 
 #include <assert.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <linux/perf_event.h>
@@ -120,6 +121,60 @@ static bool get_perf_event_by_gpu_info(const struct gpu_info_intel *gpu_info, co
   char gt_event_name[64];
   snprintf(gt_event_name, sizeof(gt_event_name), "%s-gt0", event_name);
   return measure_perf_event_by_name(pmu_name, gt_event_name, fd);
+}
+
+// Integrated GPUs sit on the CPU die and expose no hwmon of their own. The helpers below find the closest equivalents.
+
+static bool read_file_line(const char *path, char *buf, size_t size) {
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return false;
+  bool ok = fgets(buf, size, f) != NULL;
+  fclose(f);
+  if (ok)
+    buf[strcspn(buf, "\n")] = '\0';
+  return ok;
+}
+
+static bool read_file_unsigned(const char *path, unsigned *val) {
+  char buf[32];
+  if (!read_file_line(path, buf, sizeof(buf)))
+    return false;
+  char *end;
+  unsigned long v = strtoul(buf, &end, 10);
+  if (end == buf)
+    return false;
+  *val = v;
+  return true;
+}
+
+// Look for the platform fan: the first hwmon exposing a readable fan*_input
+static void find_platform_sensors(struct gpu_info_intel *gpu_info) {
+  const char hwmon_root[] = "/sys/class/hwmon";
+  DIR *dir = opendir(hwmon_root);
+  if (!dir)
+    return;
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    if (strncmp(ent->d_name, "hwmon", 5) != 0)
+      continue;
+    char path[128], name[32], label[32];
+    snprintf(path, sizeof(path), "%s/%s/name", hwmon_root, ent->d_name);
+    if (!read_file_line(path, name, sizeof(name)))
+      continue;
+
+    if (!gpu_info->platform_fan_path[0]) {
+      unsigned rpm;
+      for (unsigned i = 1; i < 10; ++i) {
+        snprintf(path, sizeof(path), "%s/%s/fan%u_input", hwmon_root, ent->d_name, i);
+        if (read_file_unsigned(path, &rpm)) {
+          snprintf(gpu_info->platform_fan_path, sizeof(gpu_info->platform_fan_path), "%s", path);
+          break;
+        }
+      }
+    }
+  }
+  closedir(dir);
 }
 
 struct gpu_vendor gpu_vendor_intel = {
@@ -451,6 +506,17 @@ void gpuinfo_intel_refresh_dynamic_info(struct gpu_info *_gpu_info) {
       gpu_info->energy.energy_uj = val;
       gpu_info->energy.time = ts;
     }
+  }
+
+  if (static_info->integrated_graphics) {
+    if (!gpu_info->platform_sensors_searched) {
+      find_platform_sensors(gpu_info);
+      gpu_info->platform_sensors_searched = true;
+    }
+    unsigned val;
+    if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, fan_rpm) && gpu_info->platform_fan_path[0] &&
+        read_file_unsigned(gpu_info->platform_fan_path, &val))
+      SET_GPUINFO_DYNAMIC(dynamic_info, fan_rpm, val);
   }
 
   switch (gpu_info->driver) {

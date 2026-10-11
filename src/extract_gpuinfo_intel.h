@@ -69,6 +69,10 @@ struct gpu_info_intel {
   } energy;
 
   int perf_event_fd;
+
+  // Integrated GPUs have no fan of their own: the platform fan is looked up in hwmon (path cached once found)
+  char platform_fan_path[96];
+  bool platform_sensors_searched;
 };
 
 extern void gpuinfo_intel_i915_refresh_dynamic_info(struct gpu_info *_gpu_info);
