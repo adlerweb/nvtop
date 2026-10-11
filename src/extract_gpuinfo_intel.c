@@ -189,6 +189,34 @@ static void find_platform_sensors(struct gpu_info_intel *gpu_info) {
   closedir(dir);
 }
 
+// GPU power from the RAPL "energy-gpu" counter of the power PMU. The counter is system wide so, like the PMU of the
+// GPU, opening it requires CAP_PERFMON, root or a permissive kernel.perf_event_paranoid.
+static bool open_rapl_gpu_energy(int *fd) {
+  const char pmu_dir[] = "/sys/bus/event_source/devices/power";
+  char path[128], buf[64];
+  unsigned type;
+  uint64_t config;
+
+  snprintf(path, sizeof(path), "%s/type", pmu_dir);
+  if (!read_file_unsigned(path, &type))
+    return false;
+  snprintf(path, sizeof(path), "%s/events/energy-gpu", pmu_dir);
+  if (!read_file_line(path, buf, sizeof(buf)) || sscanf(buf, "event=0x%" SCNx64, &config) != 1)
+    return false;
+  // Energy counters are bound to a single CPU of the package, the first one of the PMU cpumask
+  int cpu = 0;
+  snprintf(path, sizeof(path), "%s/cpumask", pmu_dir);
+  if (read_file_line(path, buf, sizeof(buf)))
+    cpu = atoi(buf);
+
+  struct perf_event_attr attr = {.type = type, .size = sizeof(attr), .config = config};
+  *fd = perf_event_open(&attr, -1, cpu, -1, 0);
+  return *fd >= 0;
+}
+
+// RAPL energy-gpu counts in units of 2^-32 J
+#define RAPL_ENERGY_UNIT_J (2.3283064365386962890625e-10)
+
 struct gpu_vendor gpu_vendor_intel = {
     .init = gpuinfo_intel_init,
     .shutdown = gpuinfo_intel_shutdown,
@@ -224,6 +252,8 @@ void gpuinfo_intel_shutdown(void) {
       ioctl(current->perf_event_fd, PERF_EVENT_IOC_DISABLE, 0);
       close(current->perf_event_fd);
     }
+    if (current->rapl_fd >= 0)
+      close(current->rapl_fd);
     nvtop_device_unref(current->card_device);
     nvtop_device_unref(current->driver_device);
   }
@@ -262,6 +292,7 @@ static void add_intel_cards(struct nvtop_device *dev, struct list_head *devices,
   thisGPU->driver_device = nvtop_device_ref(parent);
   thisGPU->hwmon_device = nvtop_device_get_hwmon(thisGPU->driver_device);
   thisGPU->perf_event_fd = PERF_EVENT_FD_NOT_OPENED;
+  thisGPU->rapl_fd = PERF_EVENT_FD_NOT_OPENED;
 
   const char *devname;
   if (nvtop_device_get_devname(thisGPU->card_device, &devname) >= 0)
@@ -532,6 +563,26 @@ void gpuinfo_intel_refresh_dynamic_info(struct gpu_info *_gpu_info) {
     if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, gpu_temp) && gpu_info->package_temp_path[0] &&
         read_file_unsigned(gpu_info->package_temp_path, &val))
       SET_GPUINFO_DYNAMIC(dynamic_info, gpu_temp, val / 1000);
+
+    if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, power_draw)) {
+      if (gpu_info->rapl_fd == PERF_EVENT_FD_NOT_OPENED && !open_rapl_gpu_energy(&gpu_info->rapl_fd))
+        gpu_info->rapl_fd = PERF_EVENT_FD_UNAVAILABLE;
+      uint64_t count;
+      if (gpu_info->rapl_fd >= 0 && read(gpu_info->rapl_fd, &count, sizeof(count)) == sizeof(count)) {
+        nvtop_time ts;
+        nvtop_get_current_time(&ts);
+        // Skip the first update so we have a time delta
+        if (gpu_info->rapl_last_time.tv_sec != 0 && count >= gpu_info->rapl_last_count) {
+          uint64_t elapsed_ns = nvtop_difftime_u64(gpu_info->rapl_last_time, ts);
+          if (elapsed_ns > 0) {
+            double joules = (count - gpu_info->rapl_last_count) * RAPL_ENERGY_UNIT_J;
+            SET_GPUINFO_DYNAMIC(dynamic_info, power_draw, (unsigned)(joules * 1e12 / elapsed_ns));
+          }
+        }
+        gpu_info->rapl_last_count = count;
+        gpu_info->rapl_last_time = ts;
+      }
+    }
   }
 
   switch (gpu_info->driver) {

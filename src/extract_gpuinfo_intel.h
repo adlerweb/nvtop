@@ -71,10 +71,13 @@ struct gpu_info_intel {
   int perf_event_fd;
 
   // Integrated GPUs have no sensors of their own: platform fan and CPU package temperature are looked up in hwmon
-  // (path cached once found)
+  // (path cached once found), and the GPU power is read from the RAPL energy-gpu counter
   char platform_fan_path[96];
   char package_temp_path[96];
   bool platform_sensors_searched;
+  int rapl_fd;
+  uint64_t rapl_last_count;
+  struct timespec rapl_last_time;
 };
 
 extern void gpuinfo_intel_i915_refresh_dynamic_info(struct gpu_info *_gpu_info);
